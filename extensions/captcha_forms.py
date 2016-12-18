@@ -4,8 +4,12 @@
 
 from hashlib import sha1
 
+"""
+Implements XEP-0158: CAPTCHA Forms
+"""
+
 def sendCaptcha(user, url):
-	logger.debug("VKLogin: sending message with captcha to %s" % user.source)
+	logger.debug("VK: sending message with captcha to %s", user.source)
 	body = _("WARNING: VK has sent you a CAPTCHA."
 		" Please, follow %s and enter the text shown on the image to the chat."
 		" Example: !captcha my_captcha_key. Tnx") % url
@@ -17,13 +21,12 @@ def sendCaptcha(user, url):
 	if image:
 		hash = sha1(image).hexdigest()
 		encoded = image.encode("base64")
-		form = utils.buildDataForm(type="form", fields = [
-			{"var": "FORM_TYPE", "value": xmpp.NS_CAPTCHA, "type": "hidden"},
+		form = utils.buildDataForm(type="form", fields=[{"var": "FORM_TYPE", "value": xmpp.NS_CAPTCHA, "type": "hidden"},
 			{"var": "from", "value": TransportID, "type": "hidden"},
 			{"var": "ocr", "label": _("Enter shown text"),
-			"payload": [xmpp.Node("required"), 
-				xmpp.Node("media", {"xmlns": xmpp.NS_MEDIA}, 
-					[xmpp.Node("uri", {"type": "image/jpg"}, 
+			"payload": [xmpp.Node("required"),
+				xmpp.Node("media", {"xmlns": xmpp.NS_MEDIA},
+					[xmpp.Node("uri", {"type": "image/jpg"},
 						["cid:sha1+%s@bob.xmpp.org" % hash]
 						)
 					])
@@ -33,7 +36,7 @@ def sendCaptcha(user, url):
 		oob = msg.setTag("data", {"cid": "sha1+%s@bob.xmpp.org" % hash, "type": "image/jpg", "max-age": "0"}, xmpp.NS_URN_OOB)
 		oob.setData(encoded)
 	sender(Component, msg)
-	sendPresence(user.source, TransportID, show="xa", reason=body)
+	sendPresence(user.source, TransportID, show="xa", reason=body, hash=USER_CAPS_HASH)
 
 TransportFeatures.update({xmpp.NS_OOB,
 	xmpp.NS_MEDIA,

@@ -14,8 +14,6 @@ import os
 
 GLOBAL_USER_SETTINGS = {"keep_online": {"label": "Keep my status online",
 										"value": 1},
-						"i_am_ghost": {"label": "I am a ghost",
-										"value": 0},
 						"force_vk_date": {"label": "Force VK timestamp for private messages",
 										"value": 0},
 						"use_nicknames": {"label": "Use nicknames instead of real names", 
@@ -35,7 +33,7 @@ class Settings(object):
 		Uses GLOBAL_USER_SETTINGS variable as default user's settings
 		and updates it using settings read from the file
 		"""
-		self.filename = "%s/%s/settings.txt" % (settingsDir, source)
+		self.filename = ("%s/%s/settings.txt" % (settingsDir, source)).lower()
 		if user:
 			self.settings = deepcopy(GLOBAL_USER_SETTINGS)
 		else:

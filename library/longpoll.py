@@ -5,7 +5,7 @@
 # to write a single-threaded longpoll client
 
 __authors__ = ("AlKorgun <alkorgun@gmail.com>", "mrDoctorWho <mrdoctorwho@gmail.com>")
-__version__ = "2.2"
+__version__ = "2.2.1"
 __license__ = "MIT"
 
 """
@@ -18,7 +18,7 @@ import vkapi as api
 import select
 import socket
 import utils
-from __main__ import Transport, logger, ALIVE, DEBUG_POLL
+from __main__ import Transport, logger, ALIVE, DEBUG_POLL, crashLog
 
 class Poll:
 	"""
@@ -35,16 +35,12 @@ class Poll:
 		Adds user in buffer on error occurred
 		Adds user in self.__list if no errors
 		"""
-		try:
-			opener = user.vk.makePoll()
-		except Exception as e:
-			if not isinstance(e, api.LongPollError):
-				crashLog("poll.add")
-			logger.error("longpoll: failed to make poll (jid: %s)" % user.source)
-			cls.__addToBuff(user)
-			return False
-		else:
-			cls.__list[opener.sock] = (user, opener)
+		if DEBUG_POLL:
+			logger.debug("longpoll: really adding user to poll (jid: %s)", user.source)
+		opener = user.vk.makePoll()
+		if DEBUG_POLL:
+			logger.debug("longpoll: user has been added to poll (jid: %s)", user.source)
+		cls.__list[opener.sock] = (user, opener)
 		return opener
 
 	@classmethod
@@ -55,7 +51,7 @@ class Poll:
 			request was failed for some reasons
 		"""
 		cls.__buff.add(user)
-		logger.debug("longpoll: adding user to watcher (jid: %s)" % user.source)
+		logger.debug("longpoll: adding user to the init buffer (jid: %s)", user.source)
 		utils.runThread(cls.__initPoll, (user,), "__initPoll-%s" % user.source)
 
 	@classmethod
@@ -63,6 +59,8 @@ class Poll:
 		"""
 		Adds the User class object to poll
 		"""
+		if DEBUG_POLL:
+			logger.debug("longpoll: adding user to poll (jid: %s)", some_user.source)
 		with cls.__lock:
 			if some_user in cls.__buff:
 				return None
@@ -70,7 +68,13 @@ class Poll:
 				if some_user == user:
 					break
 			else:
-				cls.__add(some_user)
+				try:
+					cls.__add(some_user)
+				except Exception as e:
+					if not isinstance(e, api.LongPollError):
+						crashLog("poll.add")
+					logger.error("longpoll: failed to make poll (jid: %s)", some_user.source)
+					cls.__addToBuff(some_user)
 
 	clear = staticmethod(__list.clear)
 
@@ -83,7 +87,7 @@ class Poll:
 		for x in xrange(10):
 			if user.source not in Transport:
 				logger.debug("longpoll: while we were wasting our time"
-					", the user has left (jid: %s)" % user.source)
+					", the user has left (jid: %s)", user.source)
 				with cls.__lock:
 					if user in cls.__buff:
 						cls.__buff.remove(user)
@@ -91,8 +95,8 @@ class Poll:
 
 			if Transport[user.source].vk.initPoll():
 				with cls.__lock:
-					logger.debug("longpoll: successfully initialized longpoll (jid: %s)"
-						% user.source)
+					logger.debug("longpoll: successfully initialized longpoll"
+						" (jid: %s)", user.source)
 					if user not in cls.__buff:
 						return None
 					cls.__buff.remove(user)
@@ -106,8 +110,8 @@ class Poll:
 				if user not in cls.__buff:
 					return None
 				cls.__buff.remove(user)
-			logger.error("longpoll: failed to add user to poll in 10 retries (jid: %s)"
-				% user.source)
+			logger.error("longpoll: failed to add user to poll in 10 retries"
+				" (jid: %s)", user.source)
 
 	@classmethod
 	def process(cls):
@@ -124,8 +128,8 @@ class Poll:
 				continue
 			try:
 				ready, error = select.select(socks, [], socks, 2)[::2]
-			except (select.error, socket.error) as e:
-				logger.error("longpoll: %s" % (e.message))  # debug?
+			except (select.error, socket.error, socket.timeout) as e:
+				logger.error("longpoll: %s", e.message)
 
 			for sock in error:
 				with cls.__lock:
@@ -145,19 +149,18 @@ class Poll:
 
 					# Check if user is still in the memory
 					user = Transport.get(user.source)
-					if not user:
-						continue
 					# Check if the user haven't left yet
-					if not user.vk.online:
+					if not hasattr(user, "vk") or not user.vk.online:
 						continue
+
 					utils.runThread(cls.processResult, (user, opener),
 						"poll.processResult-%s" % user.source)
 
 			with cls.__lock:
 				for sock, (user, opener) in cls.__list.items():
-					if not user.vk.online:
-						logger.debug("longpoll: user is not online, so removing their from poll"
-							" (jid: %s)" % user.source)
+					if hasattr(user, "vk") and not user.vk.online:
+						logger.debug("longpoll: user is not online, so removing them from poll"
+							" (jid: %s)", user.source)
 						try:
 							del cls.__list[sock]
 						except KeyError:
@@ -172,12 +175,12 @@ class Poll:
 		"""
 		result = utils.execute(user.processPollResult, (opener,))
 		if DEBUG_POLL:
-			logger.debug("longpoll: result=%d (jid: %s)" % (result, user.source))
+			logger.debug("longpoll: result=%s (jid: %s)", result, user.source)
 		if result == -1:
 			return None
 		# if we'll set user.vk.pollInitialized to False
-		# then an exception will be raised
-		# if we do that user will be reinitialized
+		# then makePoll() will raise an exception
+		# by doing that, we force user's poll reinitialization
 		if not result:
 			user.vk.pollInitialzed = False
 		cls.add(user)

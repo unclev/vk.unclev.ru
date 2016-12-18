@@ -5,7 +5,7 @@
 Manages VK API requests
 Provides password login and direct VK API calls
 Designed for huge number of clients (per ip)
-Which is why it has request retries
+Which is why it has that lot of code
 """
 
 __author__ = "mrDoctorWho <mrdoctorwho@gmail.com>"
@@ -21,9 +21,10 @@ import threading
 import urllib
 import urllib2
 import webtools
+from printer import *
 
-SOCKET_TIMEOUT = 30
-REQUEST_RETRIES = 6
+SOCKET_TIMEOUT = 20
+REQUEST_RETRIES = 3
 
 # VK APP ID
 APP_ID = 3789129
@@ -80,7 +81,11 @@ def attemptTo(maxRetries, resultType, *errors):
 				if hasattr(exc, "errno") and exc.errno == 101:
 					raise NetworkNotFound()
 				data = resultType()
-				logger.warning("vkapi: Error %s occurred on executing %s", exc, func)
+				logger.warning("vkapi: Error %s occurred on executing %s(*%s, **%s)",
+					exc,
+					func.func_name,
+					str(args),
+					str(kwargs))
 			return data
 
 		wrapper.__name__ = func.__name__
@@ -89,7 +94,7 @@ def attemptTo(maxRetries, resultType, *errors):
 	return decorator
 
 
-class AsyncHTTPRequest(httplib.HTTPConnection):
+class AsyncHTTPRequest(httplib.HTTPSConnection):
 	"""
 	A method to make asynchronous http request
 	Provides a way to get a socket object to use in select()
@@ -97,7 +102,7 @@ class AsyncHTTPRequest(httplib.HTTPConnection):
 
 	def __init__(self, url, data=None, headers=(), timeout=SOCKET_TIMEOUT):
 		host = urllib.splithost(urllib.splittype(url)[1])[0]
-		httplib.HTTPConnection.__init__(self, host, timeout=timeout)
+		httplib.HTTPSConnection.__init__(self, host, timeout=timeout)
 		self.url = url
 		self.data = data
 		self.headers = headers or {}
@@ -193,7 +198,6 @@ class RequestProcessor(object):
 		body = resp.read()
 		return (body, resp)
 
-	@attemptTo(REQUEST_RETRIES, tuple, *ERRORS)
 	def get(self, url, query={}):
 		"""
 		GET request
@@ -283,16 +287,18 @@ class APIBinding(RequestProcessor):
 	Translates VK errors to python exceptions
 	Allows to make a password authorization
 	"""
-	def __init__(self, token, debug=[]):
+	def __init__(self, token, debug=[], logline=""):
 		self.token = token
 		self.debug = debug
 		self.last = []
 		self.captcha = {}
 		self.lastMethod = ()
 		self.timeout = 1.00
+		# to use it in logs without showing the token
+		self.logline = logline
 		RequestProcessor.__init__(self)
 
-	def method(self, method, values=None):
+	def method(self, method, values=None, notoken=False):
 		"""
 		Issues a VK method
 		Parameters:
@@ -301,8 +307,9 @@ class APIBinding(RequestProcessor):
 		"""
 		url = "https://api.vk.com/method/%s" % method
 		values = values or {}
-		values["access_token"] = self.token
-		values["v"] = "3.0"
+		if not notoken:
+			values["access_token"] = self.token
+		values["v"] = "5.42"
 
 		if "key" in self.captcha:
 			values["captcha_sid"] = self.captcha["sid"]
@@ -310,15 +317,16 @@ class APIBinding(RequestProcessor):
 			self.captcha = {}
 
 		self.lastMethod = (method, values)
+		# prevent “too fast” errors
 		self.last.append(time.time())
 		if len(self.last) > 2:
 			if (self.last.pop() - self.last.pop(0)) <= self.timeout:
 				time.sleep(self.timeout / 3.0)
 
+		start = time.time()
 		if method in self.debug or self.debug == "all":
-			start = time.time()
-			print "issuing method %s with values %s in thread: %s" % (method,
-				str(values), threading.currentThread().name)
+			Print("SENT: method %s with values %s in thread: %s" % (method,
+				colorizeJSON(str(values)), threading.currentThread().name))
 
 		response = self.post(url, values)
 		if response:
@@ -329,9 +337,15 @@ class APIBinding(RequestProcessor):
 				except ValueError:
 					return {}
 
-			if method in self.debug or self.debug == "all":
-				print "response for method %s: %s in thread: %s (%0.2fs)" % (method,
-					str(body), threading.currentThread().name, (time.time() - start))
+			if self.debug:
+				end = time.time()
+				dbg = (method, colorizeJSON(str(body)), threading.currentThread().name, (end - start), self.logline)
+				if method in self.debug or self.debug == "all":
+					Print("GOT: for method %s: %s in thread: %s (%0.2fs) for %s" % dbg)
+
+				if self.debug == "slow":
+					if (end - start) > 3:
+						Print("GOT: (slow) response for method %s: %s in thread: %s (%0.2fs) for %s" % dbg)
 
 			if "response" in body:
 				return body["response"] or {}
@@ -342,26 +356,36 @@ class APIBinding(RequestProcessor):
 				eCode = error["error_code"]
 				eMsg = error.get("error_msg", "")
 				logger.error("vkapi: error occured on executing method"
-					" (%(method)s, code: %(eCode)s, msg: %(eMsg)s)" % vars())
+					" (%s(%s), code: %s, msg: %s), (for: %s)" % (method, values, eCode, eMsg, self.logline))
 
 				if eCode == 7:  # not allowed
 					raise NotAllowed(eMsg)
+
 				elif eCode == 10:  # internal server error
 					raise InternalServerError(eMsg)
+
 				elif eCode == 13:  # runtime error
 					raise RuntimeError(eMsg)
+
 				elif eCode == 14:  # captcha
 					if "captcha_sid" in error:
 						self.captcha = {"sid": error["captcha_sid"], "img": error["captcha_img"]}
 						raise CaptchaNeeded()
+
 				elif eCode == 15:
 					raise AccessDenied(eMsg)
+
+				elif eCode == 17:
+					raise ValidationRequired(eMsg)
+
 				# 1 - unknown error / 100 - wrong method or parameters loss
 				elif eCode in (1, 6, 9, 100):
 					if eCode in (6, 9):   # 6 - too fast / 9 - flood control
 						self.timeout += 0.05
-						logger.warning("vkapi: got code 9, increasing timeout to %0.2f",
-							self.timeout)
+						# logger doesn't seem to support %0.2f
+						logger.warning("vkapi: got code %s, increasing timeout to %0.2f (for: %s)" %
+							(eCode, self.timeout, self.logline))
+						# waiting a bit and trying to execute te method again
 						time.sleep(self.timeout)
 						return self.method(method, values)
 					return {"error": eCode}
@@ -445,5 +469,14 @@ class AccessDenied(VkApiError):
 	"""
 	This one should be ignored as well.
 	Happens for an unknown reason with any method
+	"""
+	pass
+
+
+class ValidationRequired(VkApiError):
+	"""
+	New in API v4
+	Happens if VK thinks we're
+	logging in from an unusual location
 	"""
 	pass

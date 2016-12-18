@@ -1,25 +1,41 @@
 # coding: utf-8
 # This file is a part of VK4XMPP transport
 # © simpleApps, 2014 — 2015.
-# Warning: This module contain non-optimal and really bad code.
+# Warning: This module contains not optimal and really ugly code.
 
 
 from __main__ import *
 from __main__ import _
-from utils import buildDataForm as buildForm
+from utils import buildDataForm as buildForm, buildIQError
 from xmpp import DataForm as getForm
 import modulemanager
 
-NODES = {"admin": ("Delete users", 
-					"Global message", 
-					"Show crash logs", 
-					"Reload config", 
-					"Global Transport settings", 
+NODES = {"admin": ("Delete users",
+					"Global message",
+					"Show crash logs",
+					"Reload config",
+					"Global Transport settings",
 					"Check an API token",
 					"Unload modules",
 					"(Re)load modules",
-					"Reload extensions"), 
+					"Reload extensions"),
 		"user": ("Edit settings",)}
+
+
+def getFeatures(destination, source, ns, disco=False):
+	if destination == TransportID:
+		features = TransportFeatures
+	else:
+		features = UserFeatures
+	payload = [xmpp.Node("identity", IDENTIFIER)]
+	if source in ADMIN_JIDS and disco:
+		payload.append(xmpp.Node("item", {"node": "Online users", "name": "Online users", "jid": TransportID}))
+		payload.append(xmpp.Node("item", {"node": "All users", "name": "All users", "jid": TransportID}))
+	if ns == xmpp.NS_DISCO_INFO:
+		for key in features:
+			node = xmpp.Node("feature", {"var": key})
+			payload.append(node)
+	return payload
 
 
 def disco_handler(cl, iq):
@@ -27,71 +43,71 @@ def disco_handler(cl, iq):
 	destination = iq.getTo().getStripped()
 	ns = iq.getQueryNS()
 	node = iq.getTagAttr("query", "node")
-	if not node:
-		payload = []
-		if destination == TransportID:
-			features = TransportFeatures
-		else:
-			features = UserFeatures
-
-		result = iq.buildReply("result")
-		payload.append(xmpp.Node("identity", IDENTIFIER))
+	result = iq.buildReply("result")
+	payload = []
+	if node:
 		if source in ADMIN_JIDS:
-			payload.append(xmpp.Node("item", {"node": "Online users", "name": "Online users", "jid": TransportID}))
-			payload.append(xmpp.Node("item", {"node": "All users", "name": "All users", "jid": TransportID}))
-		if ns == xmpp.NS_DISCO_INFO:
-			for key in features:
-				xNode = xmpp.Node("feature", {"var": key})
-				payload.append(xNode)
-			result.setQueryPayload(payload)
+			users = []
+			if node == "Online users":
+				users = Transport.keys()
+			elif node == "All users":
+				users = getUsersList()
+				users = [user[0] for user in users]
 
-		elif ns == xmpp.NS_DISCO_ITEMS:
-			result.setQueryPayload(payload)
-
-	elif node:
-		result = iq.buildReply("result")
-		payload = []
-		if node == "Online users" and source in ADMIN_JIDS:
-			users = Transport.keys()
 			for user in users:
-				payload.append(xmpp.Node("item", { "name": user, "jid": user }))
-			result.setQueryPayload(payload)
+				payload.append(xmpp.Node("item", {"name": user, "jid": user}))
 
-		elif node == "All users" and source in ADMIN_JIDS:
-			users = getUsersList()
-			for user in users:
-				user = user[0]
-				payload.append(xmpp.Node("item", { "name": user, "jid": user }))
-			result.setQueryPayload(payload)
-
-		elif node == xmpp.NS_COMMANDS:
+		if node == xmpp.NS_COMMANDS:
+			nodes = NODES["user"]
 			if source in ADMIN_JIDS:
-				for node in NODES["admin"]:
-					payload.append(xmpp.Node("item", {"node": node, "name": node, "jid": TransportID}))
-			for node in NODES["user"]:
+				nodes += NODES["admin"]
+			for node in nodes:
 				payload.append(xmpp.Node("item", {"node": node, "name": node, "jid": TransportID}))
-			result.setQueryPayload(payload)
 
-		else:
-			raise xmpp.NodeProcessed()
+		elif CAPS_NODE in node:
+			payload = getFeatures(destination, source, ns)
 
+		elif not payload:
+			result = buildIQError(iq, xmpp.ERR_BAD_REQUEST)
+
+	else:
+		payload = getFeatures(destination, source, ns, True)
+
+	if payload:
+		result.setQueryPayload(payload)
 	sender(cl, result)
 
 
 getUsersList = lambda: runDatabaseQuery("select jid from users", many=True)
 deleteUsers = lambda jids: [utils.execute(removeUser, (key,), False) for key in jids]
-sendGlobalMessage = lambda text: [sendMessage(Component, jid[0], TransportID, text) for jid in getUsersList()]
+
+
+def sendAnnouncement(destination, body, subject):
+	msg = xmpp.Message(destination, body, "normal", frm=TransportID)
+	timestamp = time.gmtime(time.time())
+	msg.setSubject(subject)
+	msg.setTimestamp(time.strftime("%Y%m%dT%H:%M:%S", timestamp))
+	sender(Component, msg)
+
+
+def sendGlobalMessage(body, subject, online):
+	if online:
+		users = Transport.keys()
+	else:
+		users = getUsersList()
+	for user in users:
+		sendAnnouncement(user, body, subject)
 
 
 def checkAPIToken(token):
 	"""
 	Checks API token, returns dict or error
 	"""
-	vk = VK()
+	vk = VK(token)
 	try:
-		auth = vk.auth(token, True, False)
+		auth = vk.auth()
 		if not auth:  # in case if VK() won't raise an exception
-			raise api.AuthError("Auth failed")
+			raise api.AuthError("Auth failed!")
 		else:
 			vk.online = True
 			userID = vk.getUserID()
@@ -110,7 +126,6 @@ def dictToDataForm(_dict, _fields=None):
 	"""
 	_fields = _fields or []
 	for key, value in _dict.iteritems():
-		result = {"var": key, "value": value}
 		if isinstance(value, int) and not isinstance(value, bool):
 			type = "text-signle"
 
@@ -132,9 +147,9 @@ def dictToDataForm(_dict, _fields=None):
 def getConfigFields(config):
 	fields = []
 	for key, values in config.items():
-		fields.append({"var": key, "label": _(values["label"]), 
+		fields.append({"var": key, "label": _(values["label"]),
 			"type": values.get("type", "boolean"),
-			 "value": values["value"], "desc": _(values.get("desc"))})
+			"value": values["value"], "desc": _(values.get("desc"))})
 	return fields
 
 
@@ -156,7 +171,7 @@ def commands_handler(cl, iq):
 			if source in ADMIN_JIDS:
 				if node == "Delete users":
 					if not form:
-						simpleForm = buildForm(simpleForm, 
+						simpleForm = buildForm(simpleForm,
 							fields=[{"var": "jids", "type": "jid-multi", "label": _("Jabber ID's"), "required": True}])
 					else:
 						if dictForm.get("jids"):
@@ -166,13 +181,18 @@ def commands_handler(cl, iq):
 
 				elif node == "Global message":
 					if not form:
-						simpleForm = buildForm(simpleForm, 
-							fields=[{"var": "text", "type": "text-multi", "label": _("Message"), "required": True}], 
+						simpleForm = buildForm(simpleForm,
+							fields=[
+								{"var": "subject", "type": "text-single", "label": _("Subject"), "value": "Announcement"},
+								{"var": "body", "type": "text-multi", "label": _("Message"), "required": True},
+								{"var": "online", "type": "boolean", "label": "Online users only"}
+							],
 							title=_("Enter the message text"))
 					else:
-						if dictForm.has_key("text"):
-							text = "\n".join(dictForm["text"])
-							utils.runThread(sendGlobalMessage, (text,))
+						body = "\n".join(dictForm["body"])
+						subject = dictForm["subject"]
+						online = dictForm["online"]
+						utils.runThread(sendGlobalMessage, (body, subject, online))
 						note = "The message was sent."
 						simpleForm = None
 						completed = True
@@ -180,8 +200,8 @@ def commands_handler(cl, iq):
 				elif node == "Show crash logs":
 					if not form:
 						simpleForm = buildForm(simpleForm, 
-							fields=[{"var": "filename", "type": "list-single", "label": "Filename", 
-								"options": os.listdir("crash") if os.path.exists("crash") else []}], 
+							fields=[{"var": "filename", "type": "list-single", "label": "Filename",
+								"options": os.listdir("crash") if os.path.exists("crash") else []}],
 							title="Choose wisely")
 
 					else:
@@ -190,13 +210,13 @@ def commands_handler(cl, iq):
 							body = None
 							if os.path.exists(filename):
 								body = rFile(filename)
-							simpleForm = buildForm(simpleForm, 
+							simpleForm = buildForm(simpleForm,
 								fields=[{"var": "body", "type": "text-multi", "label": "Error body", "value": body}])
 							completed = True
 
 				elif node == "Check an API token":
 					if not form:
-						simpleForm = buildForm(simpleForm, 
+						simpleForm = buildForm(simpleForm,
 							fields=[{"var": "token", "type": "text-single", "label": "API Token"}],
 							title=_("Enter the API token"))
 					else:
@@ -211,7 +231,7 @@ def commands_handler(cl, iq):
 
 							simpleForm = buildForm(simpleForm, fields=_fields)
 							completed = True
-	
+
 				elif node == "Reload config":
 					simpleForm = None
 					completed = True
@@ -248,7 +268,7 @@ def commands_handler(cl, iq):
 					modules = Manager.list()
 					if not form:
 						_fields = dictToDataForm(dict([(mod, mod in Manager.loaded) for mod in modules]))
-						simpleForm = buildForm(simpleForm, fields=_fields, title="(Re)load modules", 
+						simpleForm = buildForm(simpleForm, fields=_fields, title="(Re)load modules",
 							data=[_("Modules can be loaded or reloaded if they already loaded")])
 
 					elif form:
@@ -294,12 +314,10 @@ def commands_handler(cl, iq):
 						simpleForm = buildForm(simpleForm, fields=_fields, title="Result")
 						completed = True
 
-
 			if node == "Edit settings" and source in Transport:
 				logger.info("user want to edit their settings (jid: %s)" % source)
 				config = Transport[source].settings
 				if not form:
-					user = Transport[source]
 					simpleForm = buildForm(simpleForm, fields=getConfigFields(config), title="Choose wisely")
 
 				elif form:
@@ -309,9 +327,9 @@ def commands_handler(cl, iq):
 					note = "The settings were changed."
 					simpleForm = None
 					completed = True
-			
+
 			if completed:
-				commandTag = result.setTag("command", {"status": "completed", 
+				commandTag = result.setTag("command", {"status": "completed",
 					"node": node, "sessionid": sessionid}, namespace=xmpp.NS_COMMANDS)
 				if simpleForm:
 					commandTag.addChild(node=simpleForm)
@@ -320,7 +338,7 @@ def commands_handler(cl, iq):
 					commandTag.setTagData("note", note)
 
 			elif not form and simpleForm:
-				commandTag = result.setTag("command", {"status": "executing", 
+				commandTag = result.setTag("command", {"status": "executing",
 					"node": node, "sessionid": sessionid}, namespace=xmpp.NS_COMMANDS)
 				commandTag.addChild(node=simpleForm)
 		sender(cl, result)
@@ -328,5 +346,6 @@ def commands_handler(cl, iq):
 
 MOD_TYPE = "iq"
 MOD_FEATURES = [xmpp.NS_COMMANDS, xmpp.NS_DISCO_INFO, xmpp.NS_DISCO_ITEMS, xmpp.NS_DATA]
+MOD_FEATURES_USER = [xmpp.NS_DISCO_INFO]
 MOD_HANDLERS = ((disco_handler, "get", [xmpp.NS_DISCO_INFO, xmpp.NS_DISCO_ITEMS], False), (commands_handler, "set", "", False))
 FORM_TYPES = ("text-single", "text-multi", "jid-multi")

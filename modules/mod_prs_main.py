@@ -14,26 +14,22 @@ USERS_ON_INIT = set([])
 
 def initializeUser(source, resource, prs):
 	"""
-	Initializes user for a first time after he have registered
+	Initializes user for the first time after they connected
 	"""
-	logger.debug("User not in the transport, but a presence received. Searching in database (jid: %s)" % source)
-	data = runDatabaseQuery("select jid,username from users where jid=?", (source,), many=False)
-	if data:
-		sendPresence(source, TransportID, None, IDENTIFIER["name"], caps=True,
-			reason=_("You are being initialized, please wait..."), show="xa")
-		logger.debug("User has been found in database (jid: %s)" % source)
-		jid, phone = data
-		Transport[jid] = user = User(jid)
-		try:
-			connect = user.connect()
-		except Exception:
-			sendMessage(Component, jid, TransportID, 
-				_("Auth failed! If this error repeated, "
-					"please register again. This incident will be reported."))
-			crashLog("user.connect")
-		else:
-			user.initialize(send=True, resource=resource)  # probably we need to know resource a bit earlier than this time
-			utils.runThread(executeHandlers, ("prs01", (source, prs)))
+	logger.debug("Got a presence. Searching jid in the database. (jid: %s)", source)
+	user = User(source)
+	try:
+		user.connect()
+	except RuntimeError:
+		pass
+	except Exception:
+		sendMessage(source, TransportID,
+			_("Auth failed! If this error repeated, "
+				"please register again. This incident will be reported."))
+		crashLog("user.connect")
+	else:
+		user.initialize(send=True, resource=resource)  # probably we need to know resource a bit earlier than this time
+		utils.runThread(executeHandlers, ("prs01", (source, prs)))
 
 	if source in USERS_ON_INIT:
 		USERS_ON_INIT.remove(source)
@@ -58,7 +54,7 @@ def presence_handler(cl, prs):
 			if destination == TransportID and resource in user.resources:
 				user.resources.remove(resource)
 				if user.resources:
-					user.sendOutPresence(source)
+					user.sendOutPresence(jidFrom)
 			if not user.resources:
 				sendPresence(source, TransportID, "unavailable")
 				if transportSettings.send_unavailable:
@@ -68,7 +64,7 @@ def presence_handler(cl, prs):
 					del Transport[source]
 				except (AttributeError, KeyError):
 					pass
-	
+
 		elif pType == "error":
 			if prs.getErrorCode() == "404":
 				user.vk.disconnect()
@@ -79,15 +75,14 @@ def presence_handler(cl, prs):
 				id = vk2xmpp(destination)
 				if id in user.friends:
 					if user.friends[id]["online"]:
-						sendPresence(source, destination)
+						sendPresence(source, destination, hash=USER_CAPS_HASH)
 			if destination == TransportID:
-				sendPresence(source, destination)
-	
+				sendPresence(source, destination, hash=TRANSPORT_CAPS_HASH)
+
 		elif pType == "unsubscribe":
 			if destination == TransportID:
 				removeUser(user, True, False)
 				executeHandlers("evt09", (source,))
-
 
 	elif pType in ("available", None) and destination == TransportID:
 		# It's possible to receive more than one presence from @gmail.com
